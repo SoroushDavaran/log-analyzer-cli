@@ -72,7 +72,9 @@ class LogAnalyzer:
 
         self.unique_ips: set[str] = set()
         self.endpoint_counter: Counter[str] = Counter()
-        self.status_class_counter: Counter[str] = Counter()  # 2xx/3xx/4xx/5xx
+        self.status_class_counter: Counter[str] = Counter()
+
+        self.hourly_counter: Counter[str] = Counter()
 
     def process_line(self, line: str) -> None:
         self.total_lines += 1
@@ -88,6 +90,9 @@ class LogAnalyzer:
         status_class = f"{parsed['status'] // 100}xx"
         self.status_class_counter[status_class] += 1
 
+        hour_key = parsed["timestamp"].strftime("%Y-%m-%d %H:00")
+        self.hourly_counter[hour_key] += 1
+
     def error_rate(self) -> float:
         if self.parsed_count == 0:
             return 0.0
@@ -98,6 +103,19 @@ class LogAnalyzer:
 
     def top_endpoints(self, n: int = 10):
         return self.endpoint_counter.most_common(n)
+
+
+def print_hourly_histogram(hourly_counter: Counter) -> None:
+    if not hourly_counter:
+        print("  No data to display.")
+        return
+    hourly = dict(sorted(hourly_counter.items()))
+    max_count = max(hourly.values())
+    bar_width = 40
+    for hour, cnt in hourly.items():
+        bar_len = int((cnt / max_count) * bar_width) if max_count else 0
+        bar = "#" * bar_len
+        print(f"  {hour} | {bar:<{bar_width}} {cnt}")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -129,11 +147,16 @@ def main(argv=None) -> int:
     print(f"Bad/malformed      : {analyzer.bad_count}")
     print(f"Unique IPs         : {len(analyzer.unique_ips)}")
     print(f"Error rate (4xx+5xx): {analyzer.error_rate():.2f}%")
+
     print("\nTop 10 busiest endpoints:")
     for i, (path, cnt) in enumerate(analyzer.top_endpoints(10), 1):
         print(f"  {i:2d}. {path:<40} {cnt}")
 
+    print("\nRequests per hour:")
+    print_hourly_histogram(analyzer.hourly_counter)
+
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
