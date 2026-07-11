@@ -1,9 +1,11 @@
-#!/usr/bin/env python3
+
+from __future__ import annotations
 import argparse
 import re
 import sys
 from collections import Counter
 from datetime import datetime
+
 
 LOG_PATTERN = re.compile(
     r'^(?P<ip>\S+)\s+\S+\s+\S+\s+\[(?P<timestamp>[^\]]+)\]\s+'
@@ -15,7 +17,7 @@ LOG_PATTERN = re.compile(
 TIMESTAMP_FORMAT = "%d/%b/%Y:%H:%M:%S %z"
 
 
-def parse_line(line: str):
+def parse_line(line: str) -> dict | None:
     line = line.rstrip("\n")
     if not line.strip():
         return None
@@ -72,9 +74,15 @@ class LogAnalyzer:
 
         self.unique_ips: set[str] = set()
         self.endpoint_counter: Counter[str] = Counter()
+        self.status_counter: Counter[int] = Counter()
         self.status_class_counter: Counter[str] = Counter()
+        self.method_counter: Counter[str] = Counter()
 
         self.hourly_counter: Counter[str] = Counter()
+
+        self.total_bytes = 0
+        self.min_time: datetime | None = None
+        self.max_time: datetime | None = None
 
     def process_line(self, line: str) -> None:
         self.total_lines += 1
@@ -84,14 +92,24 @@ class LogAnalyzer:
             return
 
         self.parsed_count += 1
+        dt = parsed["timestamp"]
+
         self.unique_ips.add(parsed["ip"])
         self.endpoint_counter[parsed["path"]] += 1
+        self.status_counter[parsed["status"]] += 1
+        self.method_counter[parsed["method"]] += 1
+        self.total_bytes += parsed["size"]
 
         status_class = f"{parsed['status'] // 100}xx"
         self.status_class_counter[status_class] += 1
 
-        hour_key = parsed["timestamp"].strftime("%Y-%m-%d %H:00")
+        hour_key = dt.strftime("%Y-%m-%d %H:00")
         self.hourly_counter[hour_key] += 1
+
+        if self.min_time is None or dt < self.min_time:
+            self.min_time = dt
+        if self.max_time is None or dt > self.max_time:
+            self.max_time = dt
 
     def error_rate(self) -> float:
         if self.parsed_count == 0:
@@ -104,18 +122,69 @@ class LogAnalyzer:
     def top_endpoints(self, n: int = 10):
         return self.endpoint_counter.most_common(n)
 
+    def to_report_dict(self, top_n: int = 10) -> dict:
+        return {
+            "summary": {
+                "total_lines_read": self.total_lines,
+                "parsed_lines": self.parsed_count,
+                "bad_lines": self.bad_count,
+                "bad_lines_pct": round(
+                    (self.bad_count / self.total_lines * 100) if self.total_lines else 0, 2
+                ),
+                "unique_ips": len(self.unique_ips),
+                "error_rate_pct": round(self.error_rate(), 2),
+                "total_bytes_sent": self.total_bytes,
+                "time_range": {
+                    "start": self.min_time.isoformat() if self.min_time else None,
+                    "end": self.max_time.isoformat() if self.max_time else None,
+                },
+            },
+            "status_classes": dict(self.status_class_counter),
+            "status_codes": dict(sorted(self.status_counter.items())),
+            "methods": dict(self.method_counter),
+            "top_endpoints": self.top_endpoints(top_n),
+            "hourly_distribution": dict(sorted(self.hourly_counter.items())),
+        }
 
-def print_hourly_histogram(hourly_counter: Counter) -> None:
-    if not hourly_counter:
+
+def print_text_report(report: dict) -> None:
+    s = report["summary"]
+    line = "=" * 62
+
+    print(line)
+    print("Access Log Analysis Report")
+    print(line)
+
+    print(f"Total lines read       : {s['total_lines_read']:,}")
+    print(f"Parsed lines           : {s['parsed_lines']:,}")
+    print(f"Bad/malformed lines    : {s['bad_lines']:,} ({s['bad_lines_pct']}%)")
+    print(f"Unique IPs             : {s['unique_ips']:,}")
+    print(f"Error rate (4xx + 5xx) : {s['error_rate_pct']}%")
+    print(f"Total bytes sent       : {s['total_bytes_sent']:,} bytes")
+    tr = s["time_range"]
+    print(f"Log time range         : {tr['start']}  to  {tr['end']}")
+
+    print("\n--- Status code distribution ---")
+    for cls in sorted(report["status_classes"]):
+        print(f"  {cls}: {report['status_classes'][cls]:,}")
+
+    print("\n--- Top N busiest endpoints ---")
+    for i, (path, cnt) in enumerate(report["top_endpoints"], 1):
+        print(f"  {i:2d}. {path:<45} {cnt:,}")
+
+    print("\n--- Requests per hour ---")
+    hourly = report["hourly_distribution"]
+    if hourly:
+        max_count = max(hourly.values())
+        bar_width = 40
+        for hour, cnt in hourly.items():
+            bar_len = int((cnt / max_count) * bar_width) if max_count else 0
+            bar = "#" * bar_len
+            print(f"  {hour} | {bar:<{bar_width}} {cnt:,}")
+    else:
         print("  No data to display.")
-        return
-    hourly = dict(sorted(hourly_counter.items()))
-    max_count = max(hourly.values())
-    bar_width = 40
-    for hour, cnt in hourly.items():
-        bar_len = int((cnt / max_count) * bar_width) if max_count else 0
-        bar = "#" * bar_len
-        print(f"  {hour} | {bar:<{bar_width}} {cnt}")
+
+    print(line)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -124,6 +193,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Access log analyzer (Combined Log Format)",
     )
     parser.add_argument("logfile", help="Path to the access log file")
+    parser.add_argument("--top", type=int, default=10, metavar="N",
+                         help="Number of top endpoints to show (default: 10)")
     return parser
 
 
@@ -142,19 +213,8 @@ def main(argv=None) -> int:
         print(f"Error opening file: {exc}", file=sys.stderr)
         return 1
 
-    print(f"Total lines read   : {analyzer.total_lines}")
-    print(f"Parsed requests    : {analyzer.parsed_count}")
-    print(f"Bad/malformed      : {analyzer.bad_count}")
-    print(f"Unique IPs         : {len(analyzer.unique_ips)}")
-    print(f"Error rate (4xx+5xx): {analyzer.error_rate():.2f}%")
-
-    print("\nTop 10 busiest endpoints:")
-    for i, (path, cnt) in enumerate(analyzer.top_endpoints(10), 1):
-        print(f"  {i:2d}. {path:<40} {cnt}")
-
-    print("\nRequests per hour:")
-    print_hourly_histogram(analyzer.hourly_counter)
-
+    report = analyzer.to_report_dict(top_n=args.top)
+    print_text_report(report)
     return 0
 
 
