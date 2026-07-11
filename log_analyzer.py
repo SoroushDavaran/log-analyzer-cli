@@ -1,11 +1,12 @@
 from __future__ import annotations
 import argparse
 import gzip
+import json
 import re
 import sys
+import time
 from collections import Counter
 from datetime import datetime
-
 
 LOG_PATTERN = re.compile(
     r'^(?P<ip>\S+)\s+\S+\s+\S+\s+\[(?P<timestamp>[^\]]+)\]\s+'
@@ -61,13 +62,10 @@ def parse_line(line: str) -> dict | None:
         "user_agent": data["user_agent"],
     }
 
-
 def open_log_file(path: str):
-    """Open the log file; transparently decompress it if it ends in .gz."""
     if path.endswith(".gz"):
         return gzip.open(path, mode="rt", encoding="utf-8", errors="replace")
     return open(path, mode="rt", encoding="utf-8", errors="replace")
-
 
 class LogAnalyzer:
     def __init__(self, login_path_substr: str = "login"):
@@ -78,14 +76,12 @@ class LogAnalyzer:
         self.unique_ips: set[str] = set()
         self.endpoint_counter: Counter[str] = Counter()
         self.status_counter: Counter[int] = Counter()
-        self.status_class_counter: Counter[str] = Counter()
+        self.status_class_counter: Counter[str] = Counter()  # 2xx/3xx/4xx/5xx
         self.method_counter: Counter[str] = Counter()
 
         self.hourly_counter: Counter[str] = Counter()
         self.hourly_5xx_counter: Counter[str] = Counter()
 
-        # For suspicious-activity detection: count of 401s per IP on
-        # paths that look like a login endpoint
         self.ip_login_401_counter: Counter[str] = Counter()
         self.login_path_substr = login_path_substr.lower()
 
@@ -93,17 +89,24 @@ class LogAnalyzer:
         self.min_time: datetime | None = None
         self.max_time: datetime | None = None
 
-    def process_line(self, line: str) -> None:
+    def process_line(self, line: str, start=None, end=None) -> None:
         self.total_lines += 1
         parsed = parse_line(line)
         if parsed is None:
             self.bad_count += 1
             return
+        dt = parsed["timestamp"]
+        if start is not None or end is not None:
+            naive_dt = dt.replace(tzinfo=None)
+            if start is not None and naive_dt < start:
+                return
+            if end is not None and naive_dt > end:
+                return
 
         self.parsed_count += 1
-        dt = parsed["timestamp"]
 
-        self.unique_ips.add(parsed["ip"])
+        ip = parsed["ip"]
+        self.unique_ips.add(ip)
         self.endpoint_counter[parsed["path"]] += 1
         self.status_counter[parsed["status"]] += 1
         self.method_counter[parsed["method"]] += 1
@@ -118,12 +121,14 @@ class LogAnalyzer:
             self.hourly_5xx_counter[hour_key] += 1
 
         if parsed["status"] == 401 and self.login_path_substr in parsed["path"].lower():
-            self.ip_login_401_counter[parsed["ip"]] += 1
+            self.ip_login_401_counter[ip] += 1
 
         if self.min_time is None or dt < self.min_time:
             self.min_time = dt
         if self.max_time is None or dt > self.max_time:
             self.max_time = dt
+
+    # ---- report calculations ----
 
     def error_rate(self) -> float:
         if self.parsed_count == 0:
@@ -137,11 +142,6 @@ class LogAnalyzer:
         return self.endpoint_counter.most_common(n)
 
     def suspicious_ips(self, threshold: int = 10):
-        """
-        Return IPs whose count of 401 responses on login-like paths is
-        above the given threshold (a possible sign of a brute-force
-        login attempt).
-        """
         return [
             (ip, cnt)
             for ip, cnt in self.ip_login_401_counter.most_common()
@@ -150,11 +150,6 @@ class LogAnalyzer:
 
     def detect_error_spikes(self, multiplier: float = 3.0, min_requests: int = 20,
                              min_error_rate: float = 0.05):
-        """
-        Find hourly buckets whose 5xx error rate jumped abnormally above
-        the overall average (an error-rate spike).
-        Spike condition: rate >= average * multiplier  and  rate >= min_error_rate
-        """
         hours = sorted(self.hourly_counter.keys())
         if not hours:
             return []
@@ -185,7 +180,7 @@ class LogAnalyzer:
         return spikes
 
     def to_report_dict(self, top_n: int = 10, suspicious_threshold: int = 10,
-                        spike_multiplier: float = 3.0) -> dict:
+                        spike_multiplier: float = 3.0, elapsed_seconds: float = 0.0):
         return {
             "summary": {
                 "total_lines_read": self.total_lines,
@@ -209,8 +204,13 @@ class LogAnalyzer:
             "hourly_distribution": dict(sorted(self.hourly_counter.items())),
             "suspicious_login_ips": self.suspicious_ips(suspicious_threshold),
             "error_rate_spikes": self.detect_error_spikes(multiplier=spike_multiplier),
+            "performance": {
+                "elapsed_seconds": round(elapsed_seconds, 3),
+                "lines_per_second": round(
+                    self.total_lines / elapsed_seconds, 1
+                ) if elapsed_seconds > 0 else None,
+            },
         }
-
 
 def print_text_report(report: dict) -> None:
     s = report["summary"]
@@ -269,7 +269,25 @@ def print_text_report(report: dict) -> None:
     else:
         print("  No significant spike found.")
 
+    perf = report["performance"]
+    print("\n--- Performance ---")
+    print(f"  Execution time: {perf['elapsed_seconds']} s")
+    if perf["lines_per_second"]:
+        print(f"  Throughput: {perf['lines_per_second']:,} lines/second")
+
     print(line)
+
+def parse_cli_datetime(value: str) -> datetime:
+    """Parse a user-supplied time-range boundary; accepted formats:
+    YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"""
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    raise argparse.ArgumentTypeError(
+        f"Invalid time format: {value} (example: 2026-06-01T09:00:00)"
+    )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -277,9 +295,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         prog="log_analyzer.py",
         description="Access log analyzer (Combined Log Format)",
     )
-    parser.add_argument("logfile", help="Path to the access log file")
+    parser.add_argument("logfile", help="Path to the access log file (.log or .gz)")
     parser.add_argument("--top", type=int, default=10, metavar="N",
                          help="Number of top endpoints to show (default: 10)")
+    parser.add_argument("--json", action="store_true",
+                         help="Print the report as JSON")
+    parser.add_argument("--start", type=parse_cli_datetime, default=None,
+                         help="Only include requests after this time (e.g. 2026-06-01T09:00:00)")
+    parser.add_argument("--end", type=parse_cli_datetime, default=None,
+                         help="Only include requests before this time")
     parser.add_argument("--login-path", default="login", metavar="SUBSTR",
                          help="Substring identifying login endpoints (default: login)")
     parser.add_argument("--suspicious-threshold", type=int, default=10, metavar="N",
@@ -291,12 +315,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
+
     analyzer = LogAnalyzer(login_path_substr=args.login_path)
 
+    start_time = time.perf_counter()
     try:
         with open_log_file(args.logfile) as f:
             for line in f:
-                analyzer.process_line(line)
+                analyzer.process_line(line, start=args.start, end=args.end)
     except FileNotFoundError:
         print(f"Error: file '{args.logfile}' not found.", file=sys.stderr)
         return 1
@@ -304,12 +330,20 @@ def main(argv=None) -> int:
         print(f"Error opening file: {exc}", file=sys.stderr)
         return 1
 
+    elapsed = time.perf_counter() - start_time
+
     report = analyzer.to_report_dict(
         top_n=args.top,
         suspicious_threshold=args.suspicious_threshold,
         spike_multiplier=args.spike_multiplier,
+        elapsed_seconds=elapsed,
     )
-    print_text_report(report)
+
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print_text_report(report)
+
     return 0
 
 
