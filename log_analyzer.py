@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import argparse
 import gzip
 import re
@@ -70,7 +71,7 @@ def open_log_file(path: str):
 
 
 class LogAnalyzer:
-    def __init__(self):
+    def __init__(self, login_path_substr: str = "login"):
         self.total_lines = 0
         self.parsed_count = 0
         self.bad_count = 0
@@ -82,6 +83,11 @@ class LogAnalyzer:
         self.method_counter: Counter[str] = Counter()
 
         self.hourly_counter: Counter[str] = Counter()
+
+        # For suspicious-activity detection: count of 401s per IP on
+        # paths that look like a login endpoint
+        self.ip_login_401_counter: Counter[str] = Counter()
+        self.login_path_substr = login_path_substr.lower()
 
         self.total_bytes = 0
         self.min_time: datetime | None = None
@@ -109,6 +115,9 @@ class LogAnalyzer:
         hour_key = dt.strftime("%Y-%m-%d %H:00")
         self.hourly_counter[hour_key] += 1
 
+        if parsed["status"] == 401 and self.login_path_substr in parsed["path"].lower():
+            self.ip_login_401_counter[parsed["ip"]] += 1
+
         if self.min_time is None or dt < self.min_time:
             self.min_time = dt
         if self.max_time is None or dt > self.max_time:
@@ -125,7 +134,19 @@ class LogAnalyzer:
     def top_endpoints(self, n: int = 10):
         return self.endpoint_counter.most_common(n)
 
-    def to_report_dict(self, top_n: int = 10) -> dict:
+    def suspicious_ips(self, threshold: int = 10):
+        """
+        Return IPs whose count of 401 responses on login-like paths is
+        above the given threshold (a possible sign of a brute-force
+        login attempt).
+        """
+        return [
+            (ip, cnt)
+            for ip, cnt in self.ip_login_401_counter.most_common()
+            if cnt >= threshold
+        ]
+
+    def to_report_dict(self, top_n: int = 10, suspicious_threshold: int = 10) -> dict:
         return {
             "summary": {
                 "total_lines_read": self.total_lines,
@@ -147,6 +168,7 @@ class LogAnalyzer:
             "methods": dict(self.method_counter),
             "top_endpoints": self.top_endpoints(top_n),
             "hourly_distribution": dict(sorted(self.hourly_counter.items())),
+            "suspicious_login_ips": self.suspicious_ips(suspicious_threshold),
         }
 
 
@@ -187,6 +209,14 @@ def print_text_report(report: dict) -> None:
     else:
         print("  No data to display.")
 
+    susp = report["suspicious_login_ips"]
+    print("\n--- Suspicious activity (failed login attempts) ---")
+    if susp:
+        for ip, cnt in susp:
+            print(f"  IP {ip:<16} -> {cnt} 401 responses on a login path (possible brute-force)")
+    else:
+        print("  Nothing found.")
+
     print(line)
 
 
@@ -198,12 +228,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("logfile", help="Path to the access log file")
     parser.add_argument("--top", type=int, default=10, metavar="N",
                          help="Number of top endpoints to show (default: 10)")
+    parser.add_argument("--login-path", default="login", metavar="SUBSTR",
+                         help="Substring identifying login endpoints (default: login)")
+    parser.add_argument("--suspicious-threshold", type=int, default=10, metavar="N",
+                         help="Minimum number of 401s on login paths to flag an IP as suspicious (default: 10)")
     return parser
 
 
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
-    analyzer = LogAnalyzer()
+    analyzer = LogAnalyzer(login_path_substr=args.login_path)
 
     try:
         with open_log_file(args.logfile) as f:
@@ -216,7 +250,7 @@ def main(argv=None) -> int:
         print(f"Error opening file: {exc}", file=sys.stderr)
         return 1
 
-    report = analyzer.to_report_dict(top_n=args.top)
+    report = analyzer.to_report_dict(top_n=args.top, suspicious_threshold=args.suspicious_threshold)
     print_text_report(report)
     return 0
 
