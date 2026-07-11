@@ -213,69 +213,107 @@ class LogAnalyzer:
         }
 
 def print_text_report(report: dict) -> None:
+    # ANSI Colors for Terminal Styling
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+
     s = report["summary"]
-    line = "=" * 62
+    
+    # Header
+    print(f"\n{BOLD}{CYAN}╔{'═' * 62}╗{RESET}")
+    print(f"{BOLD}{CYAN}║{RESET} {BOLD}📊 ACCESS LOG ANALYSIS REPORT{RESET}{' ' * 33}{BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}╚{'═' * 62}╝{RESET}\n")
 
-    print(line)
-    print("Access Log Analysis Report")
-    print(line)
-
-    print(f"Total lines read       : {s['total_lines_read']:,}")
-    print(f"Parsed lines           : {s['parsed_lines']:,}")
-    print(f"Bad/malformed lines    : {s['bad_lines']:,} ({s['bad_lines_pct']}%)")
-    print(f"Unique IPs             : {s['unique_ips']:,}")
-    print(f"Error rate (4xx + 5xx) : {s['error_rate_pct']}%")
-    print(f"Total bytes sent       : {s['total_bytes_sent']:,} bytes")
+    # Summary Section
+    print(f"{BOLD}📌 [ SUMMARY ]{RESET}")
+    print(f" ├─ {DIM}Total lines read{RESET}       : {BOLD}{s['total_lines_read']:,}{RESET}")
+    print(f" ├─ {DIM}Parsed lines{RESET}           : {GREEN}{s['parsed_lines']:,}{RESET}")
+    print(f" ├─ {DIM}Bad/malformed lines{RESET}    : {RED}{s['bad_lines']:,}{RESET} {DIM}({s['bad_lines_pct']}%){RESET}")
+    print(f" ├─ {DIM}Unique IPs{RESET}             : {CYAN}{s['unique_ips']:,}{RESET}")
+    print(f" ├─ {DIM}Error rate (4xx+5xx){RESET}   : {YELLOW}{s['error_rate_pct']}%{RESET}")
+    print(f" ├─ {DIM}Total bytes sent{RESET}       : {s['total_bytes_sent']:,} bytes")
     tr = s["time_range"]
-    print(f"Log time range         : {tr['start']}  to  {tr['end']}")
+    print(f" └─ {DIM}Log time range{RESET}         : {tr['start']}  to  {tr['end']}\n")
 
-    print("\n--- Status code distribution ---")
-    for cls in sorted(report["status_classes"]):
-        print(f"  {cls}: {report['status_classes'][cls]:,}")
+    # Status Codes
+    print(f"{BOLD}🚦 [ STATUS CODE DISTRIBUTION ]{RESET}")
+    colors = {"2xx": GREEN, "3xx": CYAN, "4xx": YELLOW, "5xx": RED}
+    classes = sorted(report["status_classes"])
+    for i, cls in enumerate(classes):
+        c = colors.get(cls, RESET)
+        char = "└─" if i == len(classes) - 1 else "├─"
+        print(f" {char} {c}{cls}{RESET} : {report['status_classes'][cls]:,}")
+    if not classes:
+        print(" └─ No data.")
+    print()
 
-    print("\n--- Top N busiest endpoints ---")
-    for i, (path, cnt) in enumerate(report["top_endpoints"], 1):
-        print(f"  {i:2d}. {path:<45} {cnt:,}")
+    # Top Endpoints
+    print(f"{BOLD}🔥 [ TOP {len(report['top_endpoints'])} BUSIEST ENDPOINTS ]{RESET}")
+    endpoints = report["top_endpoints"]
+    for i, (path, cnt) in enumerate(endpoints, 1):
+        char = "└─" if i == len(endpoints) else "├─"
+        print(f" {char} {i:2d}. {CYAN}{path:<45}{RESET} {BOLD}{cnt:,}{RESET}")
+    if not endpoints:
+        print(" └─ No data.")
+    print()
 
-    print("\n--- Requests per hour ---")
+    # Requests Per Hour (Beautiful Bar Chart)
+    print(f"{BOLD}🕒 [ REQUESTS PER HOUR (TRAFFIC TREND) ]{RESET}")
     hourly = report["hourly_distribution"]
     if hourly:
         max_count = max(hourly.values())
-        bar_width = 40
-        for hour, cnt in hourly.items():
+        bar_width = 35
+        items = list(hourly.items())
+        for i, (hour, cnt) in enumerate(items):
+            char = "└─" if i == len(items) - 1 else "├─"
             bar_len = int((cnt / max_count) * bar_width) if max_count else 0
-            bar = "#" * bar_len
-            print(f"  {hour} | {bar:<{bar_width}} {cnt:,}")
+            bar = "█" * bar_len
+            empty = "░" * (bar_width - bar_len)
+            print(f" {char} {DIM}{hour}{RESET} │ {CYAN}{bar}{DIM}{empty}{RESET} {BOLD}{cnt:,}{RESET}")
     else:
-        print("  No data to display.")
+        print(" └─ No data to display.")
+    print()
 
+    # Suspicious Activity
     susp = report["suspicious_login_ips"]
-    print("\n--- Suspicious activity (failed login attempts) ---")
+    print(f"{BOLD}🚨 [ SUSPICIOUS ACTIVITY (BRUTE-FORCE DETECTED) ]{RESET}")
     if susp:
-        for ip, cnt in susp:
-            print(f"  IP {ip:<16} -> {cnt} 401 responses on a login path (possible brute-force)")
+        for i, (ip, cnt) in enumerate(susp):
+            char = "└─" if i == len(susp) - 1 else "├─"
+            print(f" {char} IP {RED}{BOLD}{ip:<16}{RESET} ➔ {YELLOW}{cnt} 401 responses{RESET} on login path")
     else:
-        print("  Nothing found.")
+        print(f" └─ {GREEN}✓ No suspicious activity detected.{RESET}")
+    print()
 
+    # Error Spikes
     spikes = report["error_rate_spikes"]
-    print("\n--- 5xx error-rate spikes ---")
+    print(f"{BOLD}⚡ [ 5XX ERROR-RATE SPIKES ]{RESET}")
     if spikes:
-        for sp in spikes:
+        for i, sp in enumerate(spikes):
+            char = "└─" if i == len(spikes) - 1 else "├─"
             print(
-                f"  Hour {sp['hour']}: error rate {sp['error_5xx_rate_pct']}% "
-                f"(overall average: {sp['baseline_rate_pct']}%) "
-                f"from {sp['error_5xx_count']}/{sp['total_requests']} requests"
+                f" {char} Hour {RED}{BOLD}{sp['hour']}{RESET} : error rate {RED}{sp['error_5xx_rate_pct']}%{RESET} "
+                f"{DIM}(avg: {sp['baseline_rate_pct']}%) from {sp['error_5xx_count']}/{sp['total_requests']} reqs{RESET}"
             )
     else:
-        print("  No significant spike found.")
+        print(f" └─ {GREEN}✓ No significant 5xx spikes found.{RESET}")
+    print()
 
+    # Performance
     perf = report["performance"]
-    print("\n--- Performance ---")
-    print(f"  Execution time: {perf['elapsed_seconds']} s")
+    print(f"{BOLD}⏱️  [ PERFORMANCE METRICS ]{RESET}")
+    print(f" ├─ {DIM}Execution time{RESET} : {perf['elapsed_seconds']} s")
     if perf["lines_per_second"]:
-        print(f"  Throughput: {perf['lines_per_second']:,} lines/second")
-
-    print(line)
+        print(f" └─ {DIM}Throughput{RESET}     : {perf['lines_per_second']:,} lines/sec")
+    else:
+        print(f" └─ {DIM}Throughput{RESET}     : N/A")
+    
+    print(f"\n{DIM}{'═' * 64}{RESET}\n")
 
 def parse_cli_datetime(value: str) -> datetime:
     """Parse a user-supplied time-range boundary; accepted formats:
