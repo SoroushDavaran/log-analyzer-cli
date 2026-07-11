@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import argparse
 import gzip
 import re
@@ -83,6 +82,7 @@ class LogAnalyzer:
         self.method_counter: Counter[str] = Counter()
 
         self.hourly_counter: Counter[str] = Counter()
+        self.hourly_5xx_counter: Counter[str] = Counter()
 
         # For suspicious-activity detection: count of 401s per IP on
         # paths that look like a login endpoint
@@ -114,6 +114,8 @@ class LogAnalyzer:
 
         hour_key = dt.strftime("%Y-%m-%d %H:00")
         self.hourly_counter[hour_key] += 1
+        if status_class == "5xx":
+            self.hourly_5xx_counter[hour_key] += 1
 
         if parsed["status"] == 401 and self.login_path_substr in parsed["path"].lower():
             self.ip_login_401_counter[parsed["ip"]] += 1
@@ -146,7 +148,44 @@ class LogAnalyzer:
             if cnt >= threshold
         ]
 
-    def to_report_dict(self, top_n: int = 10, suspicious_threshold: int = 10) -> dict:
+    def detect_error_spikes(self, multiplier: float = 3.0, min_requests: int = 20,
+                             min_error_rate: float = 0.05):
+        """
+        Find hourly buckets whose 5xx error rate jumped abnormally above
+        the overall average (an error-rate spike).
+        Spike condition: rate >= average * multiplier  and  rate >= min_error_rate
+        """
+        hours = sorted(self.hourly_counter.keys())
+        if not hours:
+            return []
+
+        rates = {}
+        for h in hours:
+            total = self.hourly_counter[h]
+            errs = self.hourly_5xx_counter.get(h, 0)
+            rates[h] = errs / total if total else 0.0
+
+        avg_rate = sum(rates.values()) / len(rates)
+        baseline = max(avg_rate, 0.001)  # avoid division by zero / oversensitivity
+
+        spikes = []
+        for h in hours:
+            total = self.hourly_counter[h]
+            if total < min_requests:
+                continue
+            r = rates[h]
+            if r >= baseline * multiplier and r >= min_error_rate:
+                spikes.append({
+                    "hour": h,
+                    "total_requests": total,
+                    "error_5xx_count": self.hourly_5xx_counter.get(h, 0),
+                    "error_5xx_rate_pct": round(r * 100, 2),
+                    "baseline_rate_pct": round(baseline * 100, 2),
+                })
+        return spikes
+
+    def to_report_dict(self, top_n: int = 10, suspicious_threshold: int = 10,
+                        spike_multiplier: float = 3.0) -> dict:
         return {
             "summary": {
                 "total_lines_read": self.total_lines,
@@ -169,6 +208,7 @@ class LogAnalyzer:
             "top_endpoints": self.top_endpoints(top_n),
             "hourly_distribution": dict(sorted(self.hourly_counter.items())),
             "suspicious_login_ips": self.suspicious_ips(suspicious_threshold),
+            "error_rate_spikes": self.detect_error_spikes(multiplier=spike_multiplier),
         }
 
 
@@ -217,6 +257,18 @@ def print_text_report(report: dict) -> None:
     else:
         print("  Nothing found.")
 
+    spikes = report["error_rate_spikes"]
+    print("\n--- 5xx error-rate spikes ---")
+    if spikes:
+        for sp in spikes:
+            print(
+                f"  Hour {sp['hour']}: error rate {sp['error_5xx_rate_pct']}% "
+                f"(overall average: {sp['baseline_rate_pct']}%) "
+                f"from {sp['error_5xx_count']}/{sp['total_requests']} requests"
+            )
+    else:
+        print("  No significant spike found.")
+
     print(line)
 
 
@@ -232,6 +284,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          help="Substring identifying login endpoints (default: login)")
     parser.add_argument("--suspicious-threshold", type=int, default=10, metavar="N",
                          help="Minimum number of 401s on login paths to flag an IP as suspicious (default: 10)")
+    parser.add_argument("--spike-multiplier", type=float, default=3.0, metavar="X",
+                         help="Threshold multiplier for a 5xx error-rate spike vs. the average (default: 3.0)")
     return parser
 
 
@@ -250,7 +304,11 @@ def main(argv=None) -> int:
         print(f"Error opening file: {exc}", file=sys.stderr)
         return 1
 
-    report = analyzer.to_report_dict(top_n=args.top, suspicious_threshold=args.suspicious_threshold)
+    report = analyzer.to_report_dict(
+        top_n=args.top,
+        suspicious_threshold=args.suspicious_threshold,
+        spike_multiplier=args.spike_multiplier,
+    )
     print_text_report(report)
     return 0
 
