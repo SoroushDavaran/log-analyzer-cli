@@ -1,6 +1,6 @@
-
 from __future__ import annotations
 import argparse
+import gzip
 import re
 import sys
 from collections import Counter
@@ -63,6 +63,9 @@ def parse_line(line: str) -> dict | None:
 
 
 def open_log_file(path: str):
+    """Open the log file; transparently decompress it if it ends in .gz."""
+    if path.endswith(".gz"):
+        return gzip.open(path, mode="rt", encoding="utf-8", errors="replace")
     return open(path, mode="rt", encoding="utf-8", errors="replace")
 
 
