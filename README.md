@@ -88,32 +88,32 @@ the parsing.
 
 ```bash
 # 1. Basic analysis on a plain text log
-python3 log_analyzer.py sample_access.log.gz
+python log_analyzer.py sample_access.log.gz
 
 # 2. Analyze a compressed gzip file directly (same command as above works
 #    automatically — detection is based on the .gz extension)
 
 # 3. Output the full report as structured JSON
-python3 log_analyzer.py sample_access.log.gz --json
+python log_analyzer.py sample_access.log.gz --json
 
 # 4. Customize the number of top busy endpoints shown (e.g. top 5)
-python3 log_analyzer.py sample_access.log.gz --top 5
+python log_analyzer.py sample_access.log.gz --top 5
 
 # 5. Restrict analysis to a specific time window
-python3 log_analyzer.py sample_access.log.gz --start 2026-06-01T14:00:00 --end 2026-06-01T15:30:00
+python log_analyzer.py sample_access.log.gz --start 2026-06-01T14:00:00 --end 2026-06-01T15:30:00
 
 # 6. Tune brute-force / error-spike sensitivity, or the login path
-python3 log_analyzer.py sample_access.log.gz --suspicious-threshold 5 --spike-multiplier 2.5 --login-path signin
+python log_analyzer.py sample_access.log.gz --suspicious-threshold 5 --spike-multiplier 2.5 --login-path signin
 
-python3 log_analyzer.py --help   # full flag reference
+python log_analyzer.py --help   # full flag reference
 ```
 
 ### Interactive shell usage
 
 ```bash
-python3 log_shell.py
+python log_shell.py
 # or auto-load a file on startup:
-python3 log_shell.py sample_access.log.gz
+python log_shell.py sample_access.log.gz
 ```
 
 The shell prints a banner listing every command (in blue) as soon as it
@@ -155,17 +155,17 @@ log> exit
 
 Colors (both in the CLI report and the shell) are only emitted when stdout
 is an actual terminal and `NO_COLOR` isn't set — redirecting output to a
-file (`python3 log_analyzer.py file.log > report.txt`) produces clean,
+file (`python log_analyzer.py file.log > report.txt`) produces clean,
 escape-code-free text.
 
 ### Developer & test commands
 
 ```bash
 # Generate a fresh sample log with a custom line count
-python3 generate_sample_log.py --lines 300000 --out sample_access.log
+python generate_sample_log.py --lines 300000 --out sample_access.log
 
 # Run the test suite with verbose output
-python3 -m unittest test_log_analyzer.py -v
+python -m unittest test_log_analyzer.py -v
 ```
 
 ---
